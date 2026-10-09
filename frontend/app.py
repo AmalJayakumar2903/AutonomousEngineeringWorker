@@ -1,3 +1,5 @@
+
+import shutil
 import sys
 from pathlib import Path
 
@@ -15,6 +17,10 @@ from backend.infrastructure import (
 )
 
 
+DEMO_REPOSITORY = "sandbox/demo_repo"
+BASELINE_DIRECTORY = ROOT / "sandbox" / "demo_repo_baseline"
+DEMO_DIRECTORY = ROOT / DEMO_REPOSITORY
+
 st.set_page_config(
     page_title="Autonomous Engineering Worker",
     page_icon="⚙️",
@@ -23,21 +29,16 @@ st.set_page_config(
 
 st.title("⚙️ Autonomous Engineering Worker")
 st.caption(
-    "An autonomous engineering worker that investigates problems, "
-    "repairs code, tests the change, and verifies the business outcome."
+    "Give the worker a business problem. It investigates, repairs, "
+    "tests, and verifies the outcome."
 )
-
-
-# ─────────────────────────────────────────────
-# Sidebar
-# ─────────────────────────────────────────────
 
 with st.sidebar:
     st.header("Worker")
 
     repository = st.text_input(
         "Repository",
-        value="sandbox/demo_repo",
+        value=DEMO_REPOSITORY,
     )
 
     request = st.text_area(
@@ -47,7 +48,7 @@ with st.sidebar:
             "Investigate the cause, fix it, and verify that duplicate "
             "orders can no longer be created."
         ),
-        height=140,
+        height=150,
     )
 
     run = st.button(
@@ -57,216 +58,200 @@ with st.sidebar:
     )
 
     st.divider()
-
     st.subheader("Infrastructure")
+    st.write("🟢 SQLite" if DATABASE_PATH.exists() else "🔴 SQLite")
+    st.write("🟢 ChromaDB" if CHROMA_PATH.exists() else "🟡 ChromaDB")
+    st.write("🟢 Redis" if get_redis() is not None else "🟡 Redis unavailable")
+    st.write("🟢 OpenTelemetry configured")
 
-    st.write(
-        "🟢 SQLite"
-        if DATABASE_PATH.exists()
-        else "🔴 SQLite"
-    )
-
-    st.write(
-        "🟢 ChromaDB"
-        if CHROMA_PATH.exists()
-        else "🔴 ChromaDB"
-    )
-
-    st.write(
-        "🟢 Redis"
-        if get_redis() is not None
-        else "🟡 Redis unavailable"
-    )
-
-    st.write("🟢 OpenTelemetry")
-
-
-# ─────────────────────────────────────────────
-# Run Worker
-# ─────────────────────────────────────────────
 
 if run:
     if not request.strip():
-        st.error("Business goal cannot be empty.")
+        st.error("Enter a business goal before running the worker.")
         st.stop()
 
-    with st.spinner("Worker executing..."):
-        try:
+    normalized_repository = repository.replace("\\", "/").strip("/")
+
+    if normalized_repository != DEMO_REPOSITORY:
+        st.error(
+            "This demo UI currently supports only sandbox/demo_repo. "
+            "Choose that repository to run the controlled demonstration."
+        )
+        st.stop()
+
+    if not BASELINE_DIRECTORY.is_dir():
+        st.error(
+            "Demo baseline is missing. Expected files in "
+            "sandbox/demo_repo_baseline/."
+        )
+        st.stop()
+
+    try:
+        # Restore the controlled test case before every run.
+        for filename in ("orders.py", "test_orders.py"):
+            source = BASELINE_DIRECTORY / filename
+            destination = DEMO_DIRECTORY / filename
+
+            if not source.is_file():
+                raise FileNotFoundError(
+                    f"Missing baseline file: {source}"
+                )
+
+            shutil.copy2(source, destination)
+
+        with st.spinner(
+            "Investigating repository, repairing code, and verifying..."
+        ):
             worker = build_worker()
+            result = worker.invoke({
+                "repository": DEMO_REPOSITORY,
+                "request": request.strip(),
+                "observations": [],
+                "status": "pending",
+                "iteration": 0,
+            })
 
-            result = worker.invoke(
-                {
-                    "repository": repository,
-                    "request": request,
-                    "observations": [],
-                    "status": "pending",
-                    "iteration": 0,
-                }
-            )
+        st.session_state["last_result"] = result
 
-            st.session_state["last_result"] = result
-
-        except Exception as exc:
-            st.exception(exc)
+    except Exception as exc:
+        st.error("Worker execution failed.")
+        st.exception(exc)
 
 
 result = st.session_state.get("last_result")
 
-
-# ─────────────────────────────────────────────
-# Result
-# ─────────────────────────────────────────────
-
 if result:
-
     st.divider()
 
     status = result.get("status", "unknown")
     observations = result.get("observations", [])
     verification = result.get("verification") or {}
 
-    if status == "completed":
+    if verification.get("verified"):
         st.success("✅ BUSINESS OUTCOME VERIFIED")
     else:
-        st.error(f"❌ Worker finished: {status.upper()}")
+        st.error(f"❌ WORKER STATUS: {status.upper()}")
 
     col1, col2, col3 = st.columns(3)
+    col1.metric("Status", status.upper())
+    col2.metric("Tool Actions", len(observations))
+    col3.metric(
+        "Verified",
+        "YES" if verification.get("verified") else "NO",
+    )
 
-    with col1:
-        st.metric("Status", status.upper())
+    # Show the diagnosis and real code diff first.
+    root_cause = next(
+        (
+            item for item in observations
+            if item.get("tool") == "analysis"
+        ),
+        None,
+    )
 
-    with col2:
-        st.metric("Actions", len(observations))
+    diffs = [
+        item for item in observations
+        if item.get("tool") == "git_diff"
+    ]
 
-    with col3:
-        st.metric(
-            "Verified",
-            "YES" if verification.get("verified") else "NO",
-        )
+    st.header("Engineering Report")
 
-    # ─────────────────────────────────────────
-    # Executive Summary
-    # ─────────────────────────────────────────
+    st.subheader("1. Root Cause")
 
-    st.subheader("What the Worker Did")
-
-    if status == "completed":
-        st.markdown(
-            """
-**Problem identified:** duplicate orders were being created because
-`create_order()` appended every order without checking for an existing
-customer/product combination.
-
-**Change made:** the worker added a duplicate check using
-`customer_id` + `product_id`. If the order already exists, the existing
-order is returned instead of creating another one.
-
-**Result:** the original test failed before the repair and passed after it.
-
-**Business outcome:** duplicate order creation was prevented and verified.
-"""
-        )
-    else:
-        st.markdown(
-            """
-The worker investigated the repository but could not verify the
-requested business outcome.
-"""
-        )
-
-    # ─────────────────────────────────────────
-    # Timeline
-    # ─────────────────────────────────────────
-
-    st.subheader("Execution Timeline")
-
-    for index, observation in enumerate(observations, 1):
-        tool = observation.get("tool", "unknown")
-        success = observation.get("success", False)
-        output = observation.get("output", "")
-        error = observation.get("error")
-
-        icon = "✅" if success else "❌"
-
-        if tool == "read_file":
-            label = "Inspected source/test file"
-
-        elif tool == "run_tests":
-            if success:
-                label = "Verification tests passed"
-            else:
-                label = "Initial tests failed"
-
-        elif tool == "analysis":
-            label = "Identified root cause"
-
-        elif tool == "write_file":
-            label = "Applied code repair"
-
-        elif tool == "git_diff":
-            label = "Generated code change"
-
+    if root_cause:
+        if root_cause.get("success"):
+            st.info(root_cause.get("output", "No explanation returned."))
         else:
-            label = tool.replace("_", " ").title()
+            st.warning(root_cause.get("output", "Diagnosis was inconclusive."))
+    else:
+        st.warning("No root-cause explanation was recorded.")
 
-        with st.expander(
-            f"{icon} {index}. {label}",
-            expanded=tool in {"analysis", "git_diff"},
-        ):
+    st.subheader("2. Actual Code Changes")
 
-            if tool == "analysis":
-                st.markdown("### Why this was changed")
-                st.info(output)
+    if diffs:
+        for index, item in enumerate(diffs, start=1):
+            st.markdown(f"**Repair attempt {index}**")
 
-            elif tool == "git_diff":
-                st.markdown("### Actual code change")
-                st.code(output, language="diff")
-
-            elif tool == "run_tests":
-                if success:
-                    st.markdown("### Test result")
-                    st.success("Verification test passed.")
-                else:
-                    st.markdown("### Error detected")
-                    st.error(
-                        "The existing implementation failed the business test."
-                    )
-
-                if output:
-                    st.code(output, language="text")
-
-                if error:
-                    st.code(error, language="text")
-
-            elif tool == "write_file":
-                st.markdown("### Action")
-                st.success(output)
-
-            elif tool == "read_file":
-                st.markdown("### Inspected file")
-                st.code(output, language="python")
-
+            if item.get("output"):
+                st.code(item["output"], language="diff")
             else:
-                if output:
-                    st.code(output, language="text")
+                st.warning("No diff was generated.")
 
-                if error:
-                    st.error(error)
+    else:
+        st.warning(
+            "No code diff was recorded. Check the repair action and its error."
+        )
 
-    # ─────────────────────────────────────────
-    # Verification
-    # ─────────────────────────────────────────
+    st.subheader("3. Test Results")
 
-    st.divider()
-    st.subheader("Verification")
+    test_observations = [
+        item for item in observations
+        if item.get("tool") == "run_tests"
+    ]
+
+    for index, item in enumerate(test_observations, start=1):
+        if item.get("success"):
+            st.success(f"Test run {index}: PASSED")
+        else:
+            st.error(f"Test run {index}: FAILED")
+
+        output = item.get("output", "")
+        error = item.get("error")
+
+        if output:
+            with st.expander(
+                f"Test run {index}: full output",
+                expanded=not item.get("success"),
+            ):
+                st.code(output, language="text")
+
+        if error:
+            st.code(error, language="text")
+
+    st.subheader("4. Execution Timeline")
+
+    # Combine repeated file reads into one section.
+    file_reads = [
+        item for item in observations
+        if item.get("tool") == "read_file"
+    ]
+
+    if file_reads:
+        with st.expander(
+            f"Inspected files ({len(file_reads)})",
+            expanded=False,
+        ):
+            for item in file_reads:
+                file_path = item.get("file_path", "Source file")
+                st.markdown(f"**{file_path}**")
+
+                if item.get("success"):
+                    st.code(item.get("output", ""), language="python")
+                else:
+                    st.error(item.get("error", "File inspection failed."))
+
+    # Keep the timeline focused on actions other than repetitive reads,
+    # test output, and the already-prominent diff.
+    for item in observations:
+        tool = item.get("tool", "unknown")
+
+        if tool in {"read_file", "run_tests", "git_diff", "analysis"}:
+            continue
+
+        success = item.get("success", False)
+        icon = "✅" if success else "❌"
+        label = tool.replace("_", " ").title()
+
+        with st.expander(f"{icon} {label}", expanded=not success):
+            if item.get("output"):
+                st.code(item["output"], language="text")
+            if item.get("error"):
+                st.error(item["error"])
+
+    st.subheader("5. Verification")
 
     if verification.get("verified"):
-        st.success(
-            verification.get(
-                "summary",
-                "Business outcome verified.",
-            )
-        )
+        st.success(verification.get("summary", "Outcome verified."))
     else:
         st.error(
             verification.get(
@@ -275,103 +260,74 @@ requested business outcome.
             )
         )
 
-    criteria = verification.get("criteria_results", {})
-
-    if criteria:
-        st.markdown("### Success criteria")
-
-        for criterion, passed in criteria.items():
-            icon = "✅" if passed else "❌"
-            st.write(
-                f"{icon} {criterion.replace('_', ' ').title()}"
-            )
-
-    evidence = verification.get("evidence", [])
-
-    if evidence:
-        st.markdown("### Evidence")
-
-        for item in evidence:
-            st.write(f"• {item}")
-
-
-# ─────────────────────────────────────────────
-# Run History
-# ─────────────────────────────────────────────
-
-st.divider()
-st.subheader("📋 Recent Worker Runs")
-
-runs = get_recent_runs(10)
-
-if runs:
-    rows = []
-
-    for run_data in runs:
-        rows.append(
-            {
-                "Status": run_data["status"].upper(),
-                "Verified": (
-                    "YES"
-                    if run_data["verified"]
-                    else "NO"
-                ),
-                "Repository": run_data["repository"],
-                "Started": run_data["started_at"]
-                .replace("T", " ")
-                [:19],
-                "Summary": (
-                    run_data["summary"]
-                    or "In progress"
-                ),
-                "Run ID": run_data["run_id"][:8],
-            }
+    for criterion, passed in verification.get(
+        "criteria_results", {}
+    ).items():
+        st.write(
+            ("✅ " if passed else "❌ ")
+            + criterion.replace("_", " ").title()
         )
 
-    st.dataframe(
-        rows,
-        use_container_width=True,
-        hide_index=True,
-    )
+    evidence = verification.get("evidence", [])
+    if evidence:
+        with st.expander("Verification evidence", expanded=True):
+            for entry in evidence:
+                st.write(f"• {entry}")
 
-else:
-    st.info("No worker runs recorded yet.")
-
-
-# ─────────────────────────────────────────────
-# Architecture
-# ─────────────────────────────────────────────
 
 st.divider()
-st.subheader("How the Worker Operates")
+st.header("Recent Worker Runs")
+
+try:
+    runs = get_recent_runs(10)
+
+    if runs:
+        rows = [
+            {
+                "Status": item.get("status", "").upper(),
+                "Verified": "YES" if item.get("verified") else "NO",
+                "Repository": item.get("repository", ""),
+                "Started": item.get("started_at", "").replace("T", " ")[:19],
+                "Summary": item.get("summary") or "In progress",
+                "Run ID": item.get("run_id", "")[:8],
+            }
+            for item in runs
+        ]
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No worker runs recorded yet.")
+
+except Exception as exc:
+    st.warning(f"Could not load run history: {exc}")
+
+
+st.divider()
+st.header("How the Worker Operates")
 
 st.code(
     """
 BUSINESS GOAL
-      ↓
-INVESTIGATE
-      ↓
-INSPECT CODE + TESTS
-      ↓
-RUN EXISTING TESTS
-      ↓
+     ↓
+INVESTIGATE SOURCE + TESTS
+     ↓
+OBSERVE INITIAL FAILURE
+     ↓
 IDENTIFY ROOT CAUSE
-      ↓
+     ↓
 REPAIR CODE
-      ↓
-SHOW ACTUAL DIFF
-      ↓
-RUN TESTS AGAIN
-      ↓
+     ↓
+DISPLAY ACTUAL SOURCE DIFF
+     ↓
+RERUN TESTS
+     ↓
 VERIFY BUSINESS OUTCOME
-      ↓
-COMPLETE
+     ↓
+COMPLETE OR REPORT FAILURE
 
-Persistence:
-SQLite  → run history
-Redis   → run status
-Chroma  → execution memory
-OTel    → execution traces
+SQLite        Run history and audit events
+Redis         Cached run status
+ChromaDB      Persistent execution memory
+OpenTelemetry Execution traces
 """,
     language="text",
 )
