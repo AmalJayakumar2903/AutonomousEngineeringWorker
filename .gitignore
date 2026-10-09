@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data
+data/
+
+# Logs
+logs/
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Sandbox: keep the demo repository, ignore generated junk
+sandbox/*
+!sandbox/demo_repo/
+!sandbox/demo_repo/*
+!sandbox/demo_repo/orders.py
+!sandbox/demo_repo/test_orders.py
